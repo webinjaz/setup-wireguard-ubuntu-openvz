@@ -1,190 +1,208 @@
 #!/bin/bash
-######################################################################
-# Script Name   : setup-wireguard.sh
-# Description   : Full WireGuard VPN server setup for Ubuntu 24.04
-# Author        : OpenAI ChatGPT
-# Date          : 2025-10-16
-# Purpose       : Automates installation, configuration, and client 
-#                 setup of WireGuard, including firewall and QR codes.
-######################################################################
+#==============================================
+# WireGuard VPN Setup Script for Ubuntu 24.04
+# Auto-detects kernel module or falls back to wireguard-go
+# Compatible with OpenVZ/VM environments
+#==============================================
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export TZ=Etc/UTC
 
-# -------------------------------#
-#  Function: Print header
-# -------------------------------#
-echo "============================================"
-echo " WireGuard VPN Setup Script for Ubuntu 24.04 "
-echo "============================================"
+log() { echo -e "[INFO] $1"; }
 
-# -------------------------------#
-#  Detect public network interface
-# -------------------------------#
-echo "[INFO] Detecting public network interface..."
-PUBLIC_IFACE=$(ip -o -4 route show to default | awk '{print $5}')
-if [[ -z "$PUBLIC_IFACE" ]]; then
-    echo "[ERROR] Could not detect public network interface!"
-    exit 1
-fi
-echo "[INFO] Public interface detected: $PUBLIC_IFACE"
+detect_interface() {
+    ip route | grep '^default' | awk '{print $5}' | head -n1
+}
 
-# -------------------------------#
-# Fix broken packages
-# -------------------------------#
-echo "[INFO] Fixing broken packages..."
-apt-get update -qq
-apt-get install -y -qq --fix-broken tzdata python3 || true
+fix_packages() {
+    log "Fixing broken packages..."
+    echo "tzdata tzdata/Areas select Etc" | debconf-set-selections
+    echo "tzdata tzdata/Zones/Etc select UTC" | debconf-set-selections
+    apt-get install -f -y
+    dpkg --configure -a
+}
 
-# -------------------------------#
-# Update and upgrade system
-# -------------------------------#
-echo "[INFO] Updating system packages..."
-apt-get update -qq
-apt-get upgrade -y -qq
+update_system() {
+    log "Updating system packages..."
+    apt-get update -y
+    apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
+}
 
-# -------------------------------#
-# Install dependencies
-# -------------------------------#
-echo "[INFO] Installing required packages..."
-apt-get install -y -qq \
-    wireguard-tools \
-    qrencode \
-    iptables-persistent \
-    ufw \
-    curl \
-    gnupg \
-    lsb-release \
-    software-properties-common \
-    make \
-    gcc \
-    linux-headers-$(uname -r)
+install_dependencies() {
+    log "Installing required packages..."
+    apt-get install -y --no-install-recommends \
+        wireguard-tools qrencode iptables-persistent ufw curl wget git iproute2 resolvconf python3 python3-pip vim
+}
 
-# -------------------------------#
-# Install wireguard-go if missing
-# -------------------------------#
-if ! command -v wireguard-go &> /dev/null; then
-    echo "[INFO] Installing wireguard-go..."
-    WG_GO_VERSION="1.0.20230928" # Latest stable as of Oct 2025
-    curl -Lo /usr/local/bin/wireguard-go "https://git.zx2c4.com/wireguard-go/snapshot/wireguard-go-${WG_GO_VERSION}.tar.gz"
-    tar -xzf /usr/local/bin/wireguard-go -C /usr/local/bin/
-    chmod +x /usr/local/bin/wireguard-go
-fi
+install_wireguard_go() {
+    if ! command -v wireguard-go &> /dev/null; then
+        log "Installing wireguard-go..."
+        apt-get install -y golang
+        go install github.com/WireGuard/wireguard-go@latest
+        export PATH=$PATH:$(go env GOPATH)/bin
+    fi
+}
 
-# -------------------------------#
-# Enable IP forwarding
-# -------------------------------#
-echo "[INFO] Enabling IP forwarding..."
-sysctl -w net.ipv4.ip_forward=1
-sysctl -w net.ipv6.conf.all.forwarding=1
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+enable_ip_forwarding() {
+    log "Enabling IP forwarding..."
+    sysctl -w net.ipv4.ip_forward=1
+    sysctl -w net.ipv6.conf.all.forwarding=1
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+}
 
-# -------------------------------#
-# Configure UFW firewall
-# -------------------------------#
-echo "[INFO] Configuring UFW firewall..."
-ufw allow 22/tcp
-ufw allow 51820/udp
-ufw --force enable
+configure_firewall() {
+    local iface=$1
+    log "Configuring UFW firewall..."
+    ufw allow 22/tcp
+    ufw allow 51820/udp
+    ufw disable || true
+    echo "y" | ufw enable
+}
 
-# -------------------------------#
-# Generate server and client keys
-# -------------------------------#
-echo "[INFO] Generating WireGuard keys..."
-SERVER_PRIVKEY=$(wg genkey)
-SERVER_PUBKEY=$(echo "$SERVER_PRIVKEY" | wg pubkey)
+generate_keys() {
+    local prefix=$1
+    local dir=$2
+    mkdir -p "$dir"
+    wg genkey | tee "$dir/${prefix}_private.key" | wg pubkey > "$dir/${prefix}_public.key"
+}
 
-CLIENT1_PRIVKEY=$(wg genkey)
-CLIENT1_PUBKEY=$(echo "$CLIENT1_PRIVKEY" | wg pubkey)
+create_server_conf() {
+    local iface=$1
+    local server_priv=$2
+    local server_pub=$3
+    local client1_pub=$4
+    local client2_pub=$5
+    mkdir -p /etc/wireguard/clients
 
-CLIENT2_PRIVKEY=$(wg genkey)
-CLIENT2_PUBKEY=$(echo "$CLIENT2_PRIVKEY" | wg pubkey)
-
-# -------------------------------#
-# Define server IP and clients
-# -------------------------------#
-WG_NETWORK="10.66.66.0/24"
-SERVER_IP="10.66.66.1"
-CLIENT1_IP="10.66.66.2"
-CLIENT2_IP="10.66.66.3"
-PORT="51820"
-
-mkdir -p /etc/wireguard/clients
-
-# -------------------------------#
-# Create server configuration
-# -------------------------------#
-echo "[INFO] Creating /etc/wireguard/wg0.conf..."
-cat > /etc/wireguard/wg0.conf <<EOL
+    cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
-Address = ${SERVER_IP}/24
-ListenPort = ${PORT}
-PrivateKey = ${SERVER_PRIVKEY}
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${PUBLIC_IFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${PUBLIC_IFACE} -j MASQUERADE
+Address = 10.66.66.1/24, fd86:ea04:1115::1/64
+ListenPort = 51820
+PrivateKey = $(cat $server_priv)
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE; ip6tables -A FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -A POSTROUTING -o $iface -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE; ip6tables -D FORWARD -i wg0 -j ACCEPT; ip6tables -t nat -D POSTROUTING -o $iface -j MASQUERADE
 SaveConfig = true
 
 [Peer]
-PublicKey = ${CLIENT1_PUBKEY}
-AllowedIPs = ${CLIENT1_IP}/32
+# Client 1
+PublicKey = $(cat $client1_pub)
+AllowedIPs = 10.66.66.2/32, fd86:ea04:1115::2/128
 
 [Peer]
-PublicKey = ${CLIENT2_PUBKEY}
-AllowedIPs = ${CLIENT2_IP}/32
-EOL
+# Client 2
+PublicKey = $(cat $client2_pub)
+AllowedIPs = 10.66.66.3/32, fd86:ea04:1115::3/128
+EOF
 
-chmod 600 /etc/wireguard/wg0.conf
+    chmod 600 /etc/wireguard/wg0.conf
+}
 
-# -------------------------------#
-# Create client configurations
-# -------------------------------#
-echo "[INFO] Creating client configuration files..."
-
-for i in 1 2; do
-  CLIENT_PRIVKEY_VAR="CLIENT${i}_PRIVKEY"
-  CLIENT_PUBKEY_VAR="CLIENT${i}_PUBKEY"
-  CLIENT_IP_VAR="CLIENT${i}_IP"
-  
-  CLIENT_CONF="/etc/wireguard/clients/client${i}.conf"
-  
-  cat > "$CLIENT_CONF" <<EOL
+create_client_conf() {
+    local name=$1
+    local client_priv=$2
+    local server_pub=$3
+    local server_ip=$4
+    local last_octet=$5
+    cat > /etc/wireguard/clients/${name}.conf <<EOF
 [Interface]
-PrivateKey = ${!CLIENT_PRIVKEY_VAR}
-Address = ${!CLIENT_IP_VAR}/24
+PrivateKey = $(cat $client_priv)
+Address = 10.66.66.${last_octet}/24, fd86:ea04:1115::${last_octet}/64
 DNS = 1.1.1.1
 
 [Peer]
-PublicKey = ${SERVER_PUBKEY}
-Endpoint = $(curl -s ifconfig.me):${PORT}
+PublicKey = $(cat $server_pub)
+Endpoint = ${server_ip}:51820
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
-EOL
+EOF
+}
 
-  chmod 600 "$CLIENT_CONF"
-  
-  # Generate QR code for mobile apps
-  echo "[INFO] QR code for client${i}:"
-  qrencode -t ansiutf8 < "$CLIENT_CONF"
-done
+display_qr() {
+    local conf=$1
+    log "QR code for $(basename $conf):"
+    qrencode -t ansiutf8 < "$conf"
+}
 
-# -------------------------------#
-# Enable and start WireGuard service
-# -------------------------------#
-echo "[INFO] Enabling wg-quick@wg0.service..."
-systemctl enable wg-quick@wg0
-systemctl start wg-quick@wg0
+enable_service() {
+    log "Enabling wg-quick@wg0 service..."
+    systemctl enable wg-quick@wg0
+    systemctl start wg-quick@wg0
+}
 
-# -------------------------------#
-# Display status
-# -------------------------------#
-echo "[INFO] WireGuard installation and configuration complete!"
-echo "Server public key: $SERVER_PUBKEY"
-echo "Clients configuration files: /etc/wireguard/clients/"
-echo
-echo "Usage:"
-echo "  Start VPN: systemctl start wg-quick@wg0"
-echo "  Stop VPN : systemctl stop wg-quick@wg0"
-echo "  Status   : systemctl status wg-quick@wg0"
-echo "  View client configs: cat /etc/wireguard/clients/client1.conf"
-echo "  Scan QR codes for mobile clients: qrencode -t ansiutf8 < /etc/wireguard/clients/client1.conf"
+#-------------------------------
+# Main Script
+#-------------------------------
+log "Detecting public network interface..."
+PUBLIC_IFACE=$(detect_interface)
+log "Public interface detected: $PUBLIC_IFACE"
+
+fix_packages
+update_system
+install_dependencies
+enable_ip_forwarding
+configure_firewall "$PUBLIC_IFACE"
+
+# Check for WireGuard kernel module
+if modprobe wireguard &> /dev/null; then
+    log "WireGuard kernel module detected, using kernel module."
+else
+    log "Kernel module not available. Using wireguard-go."
+    install_wireguard_go
+    # Create a systemd service for wireguard-go userspace
+    cat > /etc/systemd/system/wg-go@.service <<EOF
+[Unit]
+Description=WireGuard userspace interface %i
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wireguard-go %i
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable wg-go@wg0
+    systemctl start wg-go@wg0
+fi
+
+# Generate server and client keys
+generate_keys server /etc/wireguard
+generate_keys client1 /etc/wireguard/clients
+generate_keys client2 /etc/wireguard/clients
+
+# Create configs
+create_server_conf \
+    "$PUBLIC_IFACE" \
+    /etc/wireguard/server_private.key \
+    /etc/wireguard/server_public.key \
+    /etc/wireguard/clients/client1_public.key \
+    /etc/wireguard/clients/client2_public.key
+
+PUBLIC_IP=$(curl -s ifconfig.me)
+create_client_conf client1 /etc/wireguard/clients/client1_private.key /etc/wireguard/server_public.key "$PUBLIC_IP" 2
+create_client_conf client2 /etc/wireguard/clients/client2_private.key /etc/wireguard/server_public.key "$PUBLIC_IP" 3
+
+# Display QR codes for clients
+display_qr /etc/wireguard/clients/client1.conf
+display_qr /etc/wireguard/clients/client2.conf
+
+enable_service
+
+cat <<EOF
+
+WireGuard setup completed with automatic kernel module detection!
+
+Commands:
+  sudo systemctl start wg-quick@wg0
+  sudo systemctl stop wg-quick@wg0
+  sudo systemctl status wg-quick@wg0
+  sudo wg show
+
+Client configs are in /etc/wireguard/clients/
+Use the QR codes above to connect mobile clients.
+
+EOF
