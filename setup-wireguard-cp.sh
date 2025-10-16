@@ -7,17 +7,18 @@ WG_PORT=51820
 WG_SUBNET="10.0.0.1/24"
 WG_CONF="/etc/wireguard/${WG_INTERFACE}.conf"
 
-# Install dependencies
-apt update && apt install -y golang-go wireguard-tools iproute2 iptables curl unzip
+# Install dependencies silently
+export DEBIAN_FRONTEND=noninteractive
+apt update -y
+apt install -y golang-go wireguard-tools iproute2 iptables curl unzip
 
 # Download and build wireguard-go
 mkdir -p /opt/wireguard-go
 cd /opt/wireguard-go
-curl -LO https://github.com/WireGuard/wireguard-go/archive/refs/heads/master.zip
-unzip master.zip
+rm -rf wireguard-go-master master.zip
+curl -sSL https://github.com/WireGuard/wireguard-go/archive/refs/heads/master.zip -o master.zip
+unzip -o -q master.zip
 cd wireguard-go-master
-
-# Build wireguard-go from correct directory
 go build -o /usr/local/bin/wireguard-go ./main.go
 
 # Generate server keys
@@ -40,8 +41,8 @@ EOF
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 sysctl -p
 
-# Launch WireGuard-Go
-nohup /usr/local/bin/wireguard-go ${WG_INTERFACE} &
+# Launch WireGuard-Go silently
+nohup /usr/local/bin/wireguard-go ${WG_INTERFACE} >/dev/null 2>&1 &
 
 # Apply config
 wg-quick up ${WG_INTERFACE}
