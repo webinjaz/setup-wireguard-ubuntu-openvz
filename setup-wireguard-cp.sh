@@ -10,14 +10,15 @@ WG_CONF="/etc/wireguard/${WG_INTERFACE}.conf"
 # Install dependencies
 apt update && apt install -y golang-go wireguard-tools iproute2 iptables curl unzip
 
-# Download wireguard-go
+# Download and build wireguard-go
 mkdir -p /opt/wireguard-go
 cd /opt/wireguard-go
 curl -LO https://github.com/WireGuard/wireguard-go/archive/refs/heads/master.zip
 unzip master.zip
 cd wireguard-go-master
-go build
-mv wireguard-go /usr/local/bin/
+
+# Build wireguard-go from correct directory
+go build -o /usr/local/bin/wireguard-go ./main.go
 
 # Generate server keys
 mkdir -p /etc/wireguard
