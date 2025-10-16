@@ -12,16 +12,12 @@ WG_CLIENT_CONF="/etc/wireguard/client.conf"
 echo "🌐 Step 2: Installing Required Packages"
 export DEBIAN_FRONTEND=noninteractive
 apt update -y
-apt install -y curl unzip iproute2 iptables wireguard-tools golang-go
+apt install -y curl unzip iproute2 iptables wireguard-tools
 
-echo "📥 Step 3: Downloading and Building wireguard-go"
-mkdir -p /opt/wireguard-go
-cd /opt/wireguard-go
-rm -rf wireguard-go-master master.zip
-curl -sSL https://github.com/WireGuard/wireguard-go/archive/refs/heads/master.zip -o master.zip
-unzip -o -q master.zip
-cd wireguard-go-master
-go build -o /usr/local/bin/wireguard-go ./main.go
+echo "📥 Step 3: Downloading Precompiled wireguard-go Binary"
+mkdir -p /usr/local/bin
+curl -sLo /usr/local/bin/wireguard-go https://github.com/AdguardTeam/wireguard-go/releases/download/v0.0.20220316/wireguard-go-linux-amd64
+chmod +x /usr/local/bin/wireguard-go
 
 echo "🌍 Step 4: Detecting Public IP"
 PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
