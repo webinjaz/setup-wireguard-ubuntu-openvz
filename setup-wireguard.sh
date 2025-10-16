@@ -1,6 +1,6 @@
 #!/bin/bash
 # =======================================================
-# Ubuntu WireGuard + Web UI Auto Installer (Non-Active)
+# Ubuntu WireGuard + WG-Easy Web UI Auto Installer (Non-Active)
 # =======================================================
 # Tested on Ubuntu 24.04
 # =======================================================
@@ -50,24 +50,25 @@ sudo ufw --force enable
 echo "[INFO] Firewall configured"
 
 # -----------------------------
-# WireGuard Web UI
+# WG-Easy Web UI
 # -----------------------------
-echo "[INFO] Installing WireGuard UI..."
-WG_UI_DIR="/opt/wireguard-ui"
-sudo mkdir -p $WG_UI_DIR
-cd $WG_UI_DIR
-sudo wget https://github.com/ngoduykhanh/wireguard-ui/releases/latest/download/wireguard-ui-linux-amd64 -O wireguard-ui
-sudo chmod +x wireguard-ui
+echo "[INFO] Installing WG-Easy Web UI..."
+WG_EASY_DIR="/opt/wg-easy"
+sudo mkdir -p $WG_EASY_DIR
+cd $WG_EASY_DIR
+sudo wget https://github.com/WeeJeWel/wg-easy/releases/download/v1.0.0/wg-easy-linux-amd64.tar.gz
+sudo tar -xvzf wg-easy-linux-amd64.tar.gz
+sudo chmod +x wg-easy
 
-# Create systemd service for WireGuard UI
-sudo bash -c 'cat > /etc/systemd/system/wireguard-ui.service' <<EOL
+# Create systemd service for WG-Easy
+sudo bash -c 'cat > /etc/systemd/system/wg-easy.service' <<EOL
 [Unit]
-Description=WireGuard Web UI
+Description=WG-Easy Web UI
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/opt/wireguard-ui/wireguard-ui
+ExecStart=/opt/wg-easy/wg-easy
 Restart=on-failure
 
 [Install]
@@ -75,24 +76,24 @@ WantedBy=multi-user.target
 EOL
 
 sudo systemctl daemon-reload
-sudo systemctl enable wireguard-ui
-sudo systemctl start wireguard-ui
+sudo systemctl enable wg-easy
+sudo systemctl start wg-easy
 
 # -----------------------------
-# Auto-config WireGuard UI admin credentials
+# Auto-config WG-Easy admin credentials
 # -----------------------------
-WG_UI_DB="$WG_UI_DIR/wireguard-ui.db"
-if [ ! -f $WG_UI_DB ]; then
+WG_EASY_DB="$WG_EASY_DIR/wg-easy.db"
+if [ ! -f $WG_EASY_DB ]; then
     ADMIN_USER="admin"
     ADMIN_PASS=$(openssl rand -base64 16)
 
-    # Launch WireGuard UI once to create DB
-    sudo $WG_UI_DIR/wireguard-ui &
+    # Launch WG-Easy once to create DB
+    sudo $WG_EASY_DIR/wg-easy &
     sleep 5
-    sudo pkill wireguard-ui
+    sudo pkill wg-easy
 
     # Insert user credentials into SQLite DB
-    sudo sqlite3 $WG_UI_DB "INSERT INTO users (username, password_hash, is_admin) VALUES ('$ADMIN_USER', '\$(echo -n \"$ADMIN_PASS\" | sha256sum | awk '{print \$1}')', 1);"
+    sudo sqlite3 $WG_EASY_DB "INSERT INTO users (username, password_hash, is_admin) VALUES ('$ADMIN_USER', '\$(echo -n \"$ADMIN_PASS\" | sha256sum | awk '{print \$1}')', 1);"
 fi
 
 # -----------------------------
@@ -102,8 +103,8 @@ echo "[INFO] ==================================================="
 echo "[INFO] WireGuard server installed at $WG_CONF"
 echo "[INFO] WireGuard is not active by default. Start with:"
 echo "       sudo wg-quick up wg0"
-echo "[INFO] WireGuard UI running at http://$SERVER_IP:5000"
-echo "[INFO] WireGuard UI admin credentials:"
+echo "[INFO] WG-Easy Web UI running at http://$SERVER_IP:51821"
+echo "[INFO] WG-Easy admin credentials:"
 echo "       Username: $ADMIN_USER"
 echo "       Password: $ADMIN_PASS"
 echo "[INFO] ==================================================="
