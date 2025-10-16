@@ -1,7 +1,6 @@
 #!/bin/bash
 # setup-wireguard.sh
 # Fully automated WireGuard setup for Ubuntu 24.04 OpenVZ VPS
-# Includes auto-fix for tzdata and broken packages
 
 set -euo pipefail
 
@@ -11,43 +10,58 @@ SERVER_SUBNET="10.66.66.0/24"
 SERVER_PORT=51820
 CLIENT_COUNT=2
 WG_INTERFACE="wg0"
-PUBLIC_INTERFACE="venet0"  # OpenVZ default, will auto-detect later if needed
 
 log() { echo "[`date '+%Y-%m-%d %H:%M:%S'`] $*"; }
 
-# Step 0: Fix broken packages and tzdata
+# -------------------------------
+# Step 0: Fix tzdata and broken packages
+# -------------------------------
 log "Step 0: Fixing broken packages and tzdata..."
 export DEBIAN_FRONTEND=noninteractive
+sudo apt update -y || true
+sudo apt install -y --no-install-recommends tzdata || true
 sudo dpkg --configure -a || true
 sudo apt --fix-broken install -y || true
-sudo apt update -y
-sudo apt upgrade -y
-sudo apt install -y tzdata curl iproute2 iptables sudo qrencode
+sudo apt upgrade -y || true
 sudo timedatectl set-timezone UTC
 
-# Step 1: Install WireGuard tools
-log "Step 1: Installing WireGuard tools..."
-sudo apt install -y wireguard-tools
+# -------------------------------
+# Step 1: Install WireGuard and tools
+# -------------------------------
+log "Step 1: Installing WireGuard and dependencies..."
+sudo apt install -y wireguard-tools qrencode ufw iproute2 iptables curl
 
-# Step 2: Enable UFW firewall and configure rules
-log "Step 2: Configuring firewall..."
-sudo apt install -y ufw || true
+# -------------------------------
+# Step 1b: Detect public interface
+# -------------------------------
+PUBLIC_INTERFACE=$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+log "Detected public interface: $PUBLIC_INTERFACE"
+
+# -------------------------------
+# Step 2: Configure firewall
+# -------------------------------
+log "Step 2: Configuring UFW..."
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow ssh
 sudo ufw allow ${SERVER_PORT}/udp
 sudo ufw --force enable
 
+# -------------------------------
 # Step 3: Enable IP forwarding
+# -------------------------------
 log "Step 3: Enabling IP forwarding..."
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo sysctl -w net.ipv6.conf.all.forwarding=0
 echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 
-# Step 4: Generate server keys if not exist
+# -------------------------------
+# Step 4: Generate server keys
+# -------------------------------
 SERVER_PRIV_KEY_FILE="/etc/wireguard/server_private.key"
 SERVER_PUB_KEY_FILE="/etc/wireguard/server_public.key"
+
 if [ ! -f "$SERVER_PRIV_KEY_FILE" ]; then
     log "Step 4: Generating server keys..."
     sudo mkdir -p /etc/wireguard
@@ -60,7 +74,9 @@ fi
 SERVER_PRIVATE_KEY=$(sudo cat $SERVER_PRIV_KEY_FILE)
 SERVER_PUBLIC_KEY=$(sudo cat $SERVER_PUB_KEY_FILE)
 
+# -------------------------------
 # Step 5: Generate client keys
+# -------------------------------
 log "Step 5: Generating client keys..."
 declare -a CLIENT_PRIVATE_KEYS
 declare -a CLIENT_PUBLIC_KEYS
@@ -74,7 +90,9 @@ for i in $(seq 1 $CLIENT_COUNT); do
     CLIENT_PUBLIC_KEYS[$i]=$(cat $PUB_FILE)
 done
 
+# -------------------------------
 # Step 6: Create server config
+# -------------------------------
 log "Step 6: Creating server config..."
 sudo mkdir -p /etc/wireguard
 umask 077
@@ -93,7 +111,9 @@ done
 } | sudo tee $WG_CONF
 sudo chmod 600 $WG_CONF
 
+# -------------------------------
 # Step 7: Create client configs and QR codes
+# -------------------------------
 log "Step 7: Creating client configs and QR codes..."
 for i in $(seq 1 $CLIENT_COUNT); do
     CLIENT_CONF="${CLIENT_DIR}/client${i}.conf"
@@ -114,7 +134,9 @@ for i in $(seq 1 $CLIENT_COUNT); do
     qrencode -t ansiutf8 < $CLIENT_CONF
 done
 
+# -------------------------------
 # Step 8: Enable WireGuard service
+# -------------------------------
 log "Step 8: Enabling WireGuard service..."
 sudo systemctl enable wg-quick@$WG_INTERFACE
 sudo systemctl start wg-quick@$WG_INTERFACE
