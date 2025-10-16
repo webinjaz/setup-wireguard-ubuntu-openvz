@@ -1,61 +1,111 @@
 #!/bin/bash
 set -e
 
-echo "[INFO] Starting system fix and WireGuard setup..."
-
-# 1. Set DEBIAN_FRONTEND to noninteractive to avoid prompts
+# -----------------------------
+# Basic System Setup
+# -----------------------------
 export DEBIAN_FRONTEND=noninteractive
-export TZ=Etc/UTC  # Default timezone to avoid tzdata prompt
 
-# 2. Update package lists
-apt update -y
+echo "[INFO] Updating system..."
+sudo apt update -y
+sudo apt upgrade -y
+sudo apt install -y software-properties-common curl wget ufw gnupg lsb-release
 
-# 3. Fix broken packages
+# -----------------------------
+# Fix tzdata and Python packages
+# -----------------------------
 echo "[INFO] Fixing broken packages..."
-apt install -f -y || true
-dpkg --configure -a || true
+sudo apt --fix-broken install -y
+sudo dpkg --configure -a
+sudo apt install -f -y
 
-# 4. Reconfigure tzdata non-interactively
-echo "[INFO] Configuring tzdata..."
-ln -fs /usr/share/zoneinfo/$TZ /etc/localtime
-dpkg-reconfigure -f noninteractive tzdata || true
+# Force configure tzdata
+echo "tzdata tzdata/Areas select Etc" | sudo debconf-set-selections
+echo "tzdata tzdata/Zones/Etc select UTC" | sudo debconf-set-selections
+sudo dpkg-reconfigure -f noninteractive tzdata
 
-# 5. Fix any remaining broken dependencies
-apt --fix-broken install -y
+# Reconfigure Python packages if broken
+sudo apt --fix-broken install -y
 
-# 6. Upgrade system safely
-echo "[INFO] Upgrading system packages..."
-apt upgrade -y
+# -----------------------------
+# Install WireGuard
+# -----------------------------
+echo "[INFO] Installing WireGuard..."
+sudo apt install -y wireguard wireguard-tools
 
-# 7. Install required packages
-echo "[INFO] Installing required packages..."
-apt install -y wireguard wireguard-tools iproute2 curl vim systemd
-
-# 8. Ensure Python 3.12 is configured
-dpkg --configure -a || true
-
-# 9. WireGuard setup
-echo "[INFO] Setting up WireGuard..."
-if modprobe wireguard 2>/dev/null; then
-    echo "[INFO] Kernel supports WireGuard. Enabling wg-quick..."
-    systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0 || true
-else
-    echo "[INFO] Kernel module not found. Using WireGuard-Go..."
-    apt install -y wireguard-go
-    wg-quick down wg0 2>/dev/null || true
-    wireguard-go wg0
-    wg setconf wg0 /etc/wireguard/wg0.conf
-
-    # Ensure userspace interface starts on boot
-    if ! grep -q "wireguard-go wg0" /etc/rc.local 2>/dev/null; then
-        sed -i '/^exit 0/i wireguard-go wg0\nwg setconf wg0 /etc/wireguard/wg0.conf' /etc/rc.local
-        chmod +x /etc/rc.local
-    fi
+# Generate server keys if not exist
+WG_DIR="/etc/wireguard"
+sudo mkdir -p $WG_DIR
+if [ ! -f $WG_DIR/server_private.key ]; then
+    sudo wg genkey | sudo tee $WG_DIR/server_private.key | sudo wg pubkey | sudo tee $WG_DIR/server_public.key
 fi
 
-# 10. Show WireGuard status
-echo "[INFO] WireGuard status:"
-wg show || true
+SERVER_PRIV_KEY=$(sudo cat $WG_DIR/server_private.key)
+SERVER_PUB_KEY=$(sudo cat $WG_DIR/server_public.key)
 
-echo "[INFO] System fix and WireGuard setup completed!"
+# Default server config (non-active mode)
+WG_CONF="$WG_DIR/wg0.conf"
+sudo bash -c "cat > $WG_CONF" <<EOL
+[Interface]
+PrivateKey = $SERVER_PRIV_KEY
+Address = 10.10.0.1/24
+ListenPort = 51820
+SaveConfig = true
+EOL
+
+sudo chmod 600 $WG_CONF
+sudo systemctl enable wg-quick@wg0.service
+
+# -----------------------------
+# Setup UFW firewall for WireGuard
+# -----------------------------
+sudo ufw allow 51820/udp
+sudo ufw --force enable
+
+# -----------------------------
+# Install WireGuard Web UI (WireGuard-UI)
+# -----------------------------
+echo "[INFO] Installing WireGuard UI..."
+WG_UI_DIR="/opt/wireguard-ui"
+sudo mkdir -p $WG_UI_DIR
+cd $WG_UI_DIR
+sudo wget https://github.com/ngoduykhanh/wireguard-ui/releases/latest/download/wireguard-ui-linux-amd64 -O wireguard-ui
+sudo chmod +x wireguard-ui
+
+# Create systemd service for WireGuard UI
+sudo bash -c 'cat > /etc/systemd/system/wireguard-ui.service' <<EOL
+[Unit]
+Description=WireGuard Web UI
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/wireguard-ui/wireguard-ui
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+sudo systemctl daemon-reload
+sudo systemctl enable wireguard-ui
+sudo systemctl start wireguard-ui
+
+# -----------------------------
+# Auto-config admin credentials
+# -----------------------------
+WG_UI_DB="$WG_UI_DIR/wireguard-ui.db"
+if [ ! -f $WG_UI_DB ]; then
+    # Will auto create with default admin/admin on first run
+    sudo $WG_UI_DIR/wireguard-ui &
+    sleep 5
+    sudo pkill wireguard-ui
+fi
+
+# -----------------------------
+# Summary
+# -----------------------------
+echo "[INFO] WireGuard and WireGuard UI installed!"
+echo "[INFO] Server wg0.conf located at: $WG_CONF"
+echo "[INFO] Access WireGuard UI at http://<server_ip>:5000 (default admin/admin)"
+echo "[INFO] WireGuard not started automatically (non-active mode). Use: sudo wg-quick up wg0"
