@@ -1,69 +1,56 @@
 #!/bin/bash
+# =======================================================
+# Ubuntu WireGuard + Web UI Auto Installer (Non-Active)
+# =======================================================
+# Tested on Ubuntu 24.04
+# =======================================================
+
 set -e
+echo "[INFO] Starting WireGuard installation script..."
 
 # -----------------------------
-# Basic System Setup
+# Update system and fix broken packages
 # -----------------------------
-export DEBIAN_FRONTEND=noninteractive
-
-echo "[INFO] Updating system..."
-sudo apt update -y
-sudo apt upgrade -y
-sudo apt install -y software-properties-common curl wget ufw gnupg lsb-release
-
-# -----------------------------
-# Fix tzdata and Python packages
-# -----------------------------
-echo "[INFO] Fixing broken packages..."
-sudo apt --fix-broken install -y
+sudo apt-get update -y
+sudo apt-get upgrade -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken tzdata
 sudo dpkg --configure -a
-sudo apt install -f -y
-
-# Force configure tzdata
-echo "tzdata tzdata/Areas select Etc" | sudo debconf-set-selections
-echo "tzdata tzdata/Zones/Etc select UTC" | sudo debconf-set-selections
-sudo dpkg-reconfigure -f noninteractive tzdata
-
-# Reconfigure Python packages if broken
-sudo apt --fix-broken install -y
+sudo apt-get install -y wireguard qrencode ufw curl wget sqlite3
 
 # -----------------------------
-# Install WireGuard
+# WireGuard server setup
 # -----------------------------
-echo "[INFO] Installing WireGuard..."
-sudo apt install -y wireguard wireguard-tools
+WG_CONF="/etc/wireguard/wg0.conf"
+SERVER_PORT=51820
+SERVER_IP=$(curl -s https://ipinfo.io/ip)
+WG_NET="10.66.66.0/24"
 
-# Generate server keys if not exist
-WG_DIR="/etc/wireguard"
-sudo mkdir -p $WG_DIR
-if [ ! -f $WG_DIR/server_private.key ]; then
-    sudo wg genkey | sudo tee $WG_DIR/server_private.key | sudo wg pubkey | sudo tee $WG_DIR/server_public.key
-fi
+echo "[INFO] Generating WireGuard keys..."
+SERVER_PRIV_KEY=$(wg genkey)
+SERVER_PUB_KEY=$(echo "$SERVER_PRIV_KEY" | wg pubkey)
 
-SERVER_PRIV_KEY=$(sudo cat $WG_DIR/server_private.key)
-SERVER_PUB_KEY=$(sudo cat $WG_DIR/server_public.key)
-
-# Default server config (non-active mode)
-WG_CONF="$WG_DIR/wg0.conf"
+sudo mkdir -p /etc/wireguard
 sudo bash -c "cat > $WG_CONF" <<EOL
 [Interface]
+Address = ${WG_NET%.*}.1/24
+ListenPort = $SERVER_PORT
 PrivateKey = $SERVER_PRIV_KEY
-Address = 10.10.0.1/24
-ListenPort = 51820
 SaveConfig = true
 EOL
 
 sudo chmod 600 $WG_CONF
-sudo systemctl enable wg-quick@wg0.service
+echo "[INFO] WireGuard server config created at $WG_CONF"
 
 # -----------------------------
-# Setup UFW firewall for WireGuard
+# Firewall (UFW)
 # -----------------------------
-sudo ufw allow 51820/udp
+sudo ufw allow $SERVER_PORT/udp
+sudo ufw allow OpenSSH
 sudo ufw --force enable
+echo "[INFO] Firewall configured"
 
 # -----------------------------
-# Install WireGuard Web UI (WireGuard-UI)
+# WireGuard Web UI
 # -----------------------------
 echo "[INFO] Installing WireGuard UI..."
 WG_UI_DIR="/opt/wireguard-ui"
@@ -92,20 +79,31 @@ sudo systemctl enable wireguard-ui
 sudo systemctl start wireguard-ui
 
 # -----------------------------
-# Auto-config admin credentials
+# Auto-config WireGuard UI admin credentials
 # -----------------------------
 WG_UI_DB="$WG_UI_DIR/wireguard-ui.db"
 if [ ! -f $WG_UI_DB ]; then
-    # Will auto create with default admin/admin on first run
+    ADMIN_USER="admin"
+    ADMIN_PASS=$(openssl rand -base64 16)
+
+    # Launch WireGuard UI once to create DB
     sudo $WG_UI_DIR/wireguard-ui &
     sleep 5
     sudo pkill wireguard-ui
+
+    # Insert user credentials into SQLite DB
+    sudo sqlite3 $WG_UI_DB "INSERT INTO users (username, password_hash, is_admin) VALUES ('$ADMIN_USER', '\$(echo -n \"$ADMIN_PASS\" | sha256sum | awk '{print \$1}')', 1);"
 fi
 
 # -----------------------------
 # Summary
 # -----------------------------
-echo "[INFO] WireGuard and WireGuard UI installed!"
-echo "[INFO] Server wg0.conf located at: $WG_CONF"
-echo "[INFO] Access WireGuard UI at http://<server_ip>:5000 (default admin/admin)"
-echo "[INFO] WireGuard not started automatically (non-active mode). Use: sudo wg-quick up wg0"
+echo "[INFO] ==================================================="
+echo "[INFO] WireGuard server installed at $WG_CONF"
+echo "[INFO] WireGuard is not active by default. Start with:"
+echo "       sudo wg-quick up wg0"
+echo "[INFO] WireGuard UI running at http://$SERVER_IP:5000"
+echo "[INFO] WireGuard UI admin credentials:"
+echo "       Username: $ADMIN_USER"
+echo "       Password: $ADMIN_PASS"
+echo "[INFO] ==================================================="
