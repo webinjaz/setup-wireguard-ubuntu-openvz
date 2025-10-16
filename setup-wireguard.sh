@@ -1,142 +1,160 @@
-#!/usr/bin/env bash
-# WireGuard-go setup for Ubuntu 24.04 OpenVZ VPS
-# Author: YourName
-# Date: 2025-10-16
+#!/bin/bash
+# setup-wireguard.sh
+# Fully automated WireGuard-go VPN setup for Ubuntu 24.04 on OpenVZ
 
 set -e
 
-echo "[INFO] Starting WireGuard-go setup..."
+# -----------------------
+# CONFIGURATION VARIABLES
+# -----------------------
+WG_INTERFACE="wg0"
+WG_PORT=51820
+VPN_SUBNET="10.66.66.0/24"
+WG_DIR="/etc/wireguard"
+SERVER_PRIVATE_KEY_FILE="$WG_DIR/server_private.key"
+SERVER_PUBLIC_KEY_FILE="$WG_DIR/server_public.key"
+CLIENT1_NAME="laptop"
+CLIENT2_NAME="mobile"
 
-# 1. Update system and install dependencies
-echo "[STEP 1] Installing dependencies..."
+# -----------------------
+# FUNCTION: INFO PRINT
+# -----------------------
+log() { echo -e "[INFO] $1"; }
+
+# -----------------------
+# STEP 1: SYSTEM UPDATE & DEPENDENCIES
+# -----------------------
+log "Updating system and installing dependencies..."
 sudo apt update
-sudo DEBIAN_FRONTEND=noninteractive apt install -y git curl iproute2 iptables qrencode ufw build-essential unzip wget golang
+sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+    git curl iproute2 iptables qrencode ufw build-essential unzip wget golang wireguard-tools
 
-# 2. Setup Go environment
-GO_VERSION="1.25.3"
-if ! go version | grep -q "$GO_VERSION"; then
-    echo "[INFO] Installing Go $GO_VERSION..."
-    wget -q https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz -O /tmp/go.tar.gz
-    sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf /tmp/go.tar.gz
-    export PATH=$PATH:/usr/local/go/bin
+# -----------------------
+# STEP 2: ENABLE IP FORWARDING
+# -----------------------
+log "Enabling IP forwarding..."
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv6.conf.all.forwarding=0
+sudo bash -c 'echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf'
+sudo bash -c 'echo "net.ipv6.conf.all.forwarding=0" >> /etc/sysctl.conf'
+
+# -----------------------
+# STEP 3: FIREWALL CONFIG
+# -----------------------
+log "Configuring UFW firewall..."
+sudo ufw allow $WG_PORT/udp
+sudo ufw allow OpenSSH
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw --force enable
+
+# -----------------------
+# STEP 4: INSTALL WIREGUARD-GO
+# -----------------------
+log "Installing WireGuard-go..."
+cd /tmp
+if [ ! -d wireguard-go ]; then
+    git clone https://git.zx2c4.com/wireguard-go
 fi
-
-# 3. Clone and build WireGuard-go
-WG_DIR="/opt/wireguard-go"
-if [ ! -d "$WG_DIR" ]; then
-    echo "[STEP 2] Cloning WireGuard-go..."
-    sudo git clone https://git.zx2c4.com/wireguard-go $WG_DIR
-else
-    echo "[INFO] WireGuard-go already cloned"
-fi
-
-echo "[STEP 3] Building WireGuard-go..."
-cd $WG_DIR
-sudo make
+cd wireguard-go
+make
 sudo cp wireguard-go /usr/local/bin/
 sudo chmod +x /usr/local/bin/wireguard-go
 
-# 4. Configure UFW
-echo "[STEP 4] Configuring UFW..."
-sudo ufw allow 51820/udp
-sudo ufw allow OpenSSH
-sudo ufw --force enable
+# -----------------------
+# STEP 5: GENERATE SERVER AND CLIENT KEYS
+# -----------------------
+mkdir -p $WG_DIR
+log "[STEP 6] Generating keys..."
+wg genkey | tee $SERVER_PRIVATE_KEY_FILE | wg pubkey > $SERVER_PUBLIC_KEY_FILE
 
-# 5. Enable IP forwarding
-echo "[STEP 5] Enabling IP forwarding..."
-sudo sysctl -w net.ipv4.ip_forward=1
-echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+CLIENT1_PRIVATE=$(wg genkey)
+CLIENT1_PUBLIC=$(echo $CLIENT1_PRIVATE | wg pubkey)
+CLIENT2_PRIVATE=$(wg genkey)
+CLIENT2_PUBLIC=$(echo $CLIENT2_PRIVATE | wg pubkey)
 
-# 6. Generate server and client keys
-WG_CONF="/etc/wireguard/wg0.conf"
-mkdir -p /etc/wireguard
-chmod 700 /etc/wireguard
-
-echo "[STEP 6] Generating keys..."
-SERVER_PRIV=$(wg genkey)
-SERVER_PUB=$(echo $SERVER_PRIV | wg pubkey)
-
-CLIENT1_PRIV=$(wg genkey)
-CLIENT1_PUB=$(echo $CLIENT1_PRIV | wg pubkey)
-
-CLIENT2_PRIV=$(wg genkey)
-CLIENT2_PUB=$(echo $CLIENT2_PRIV | wg pubkey)
-
-# 7. Create WireGuard config
-echo "[STEP 7] Creating wg0.conf..."
-cat <<EOF | sudo tee $WG_CONF
+# -----------------------
+# STEP 6: CREATE SERVER CONFIG
+# -----------------------
+log "[STEP 7] Creating $WG_INTERFACE.conf..."
+sudo tee $WG_DIR/$WG_INTERFACE.conf > /dev/null <<EOL
 [Interface]
 Address = 10.66.66.1/24
-ListenPort = 51820
-PrivateKey = $SERVER_PRIV
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o venet0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o venet0 -j MASQUERADE
+ListenPort = $WG_PORT
+PrivateKey = $(cat $SERVER_PRIVATE_KEY_FILE)
+PostUp = iptables -A FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -A POSTROUTING -o venet0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -D POSTROUTING -o venet0 -j MASQUERADE
 
 [Peer]
-PublicKey = $CLIENT1_PUB
+PublicKey = $CLIENT1_PUBLIC
 AllowedIPs = 10.66.66.2/32
 
 [Peer]
-PublicKey = $CLIENT2_PUB
+PublicKey = $CLIENT2_PUBLIC
 AllowedIPs = 10.66.66.3/32
-EOF
-sudo chmod 600 $WG_CONF
+EOL
 
-# 8. Create client configs
-echo "[STEP 8] Creating client configs..."
-CLIENT1_CONF="/etc/wireguard/client1.conf"
-CLIENT2_CONF="/etc/wireguard/client2.conf"
+sudo chmod 600 $WG_DIR/$WG_INTERFACE.conf
 
-cat <<EOF | sudo tee $CLIENT1_CONF
+# -----------------------
+# STEP 7: CREATE CLIENT CONFIGS
+# -----------------------
+log "[STEP 8] Creating client configuration files..."
+mkdir -p ~/wg-clients
+
+cat > ~/wg-clients/$CLIENT1_NAME.conf <<EOL
 [Interface]
-PrivateKey = $CLIENT1_PRIV
+PrivateKey = $CLIENT1_PRIVATE
 Address = 10.66.66.2/24
 DNS = 1.1.1.1
 
 [Peer]
-PublicKey = $SERVER_PUB
-Endpoint = $(curl -s https://api.ipify.org):51820
+PublicKey = $(cat $SERVER_PUBLIC_KEY_FILE)
+Endpoint = $(curl -s ifconfig.me):$WG_PORT
 AllowedIPs = 0.0.0.0/0, ::/0
-EOF
+PersistentKeepalive = 25
+EOL
 
-cat <<EOF | sudo tee $CLIENT2_CONF
+cat > ~/wg-clients/$CLIENT2_NAME.conf <<EOL
 [Interface]
-PrivateKey = $CLIENT2_PRIV
+PrivateKey = $CLIENT2_PRIVATE
 Address = 10.66.66.3/24
 DNS = 1.1.1.1
 
 [Peer]
-PublicKey = $SERVER_PUB
-Endpoint = $(curl -s https://api.ipify.org):51820
+PublicKey = $(cat $SERVER_PUBLIC_KEY_FILE)
+Endpoint = $(curl -s ifconfig.me):$WG_PORT
 AllowedIPs = 0.0.0.0/0, ::/0
-EOF
+PersistentKeepalive = 25
+EOL
 
-# 9. Generate QR codes
-echo "[STEP 9] Generating QR codes..."
-qrencode -t ansiutf8 < $CLIENT2_CONF
+log "[INFO] Generating QR code for mobile client..."
+qrencode -t ansiutf8 < ~/wg-clients/$CLIENT2_NAME.conf
 
-# 10. Create systemd service
-echo "[STEP 10] Creating systemd service..."
-SERVICE_FILE="/etc/systemd/system/wg0.service"
-cat <<EOF | sudo tee $SERVICE_FILE
+# -----------------------
+# STEP 8: CREATE SYSTEMD SERVICE
+# -----------------------
+log "[STEP 9] Creating systemd service..."
+sudo tee /etc/systemd/system/$WG_INTERFACE.service > /dev/null <<EOL
 [Unit]
 Description=WireGuard-go VPN
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/wireguard-go wg0
+ExecStart=/usr/local/bin/wireguard-go $WG_INTERFACE
 Restart=on-failure
-User=root
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOL
 
 sudo systemctl daemon-reload
-sudo systemctl enable wg0
-sudo systemctl start wg0
+sudo systemctl enable $WG_INTERFACE
+sudo systemctl start $WG_INTERFACE
 
-echo "[DONE] WireGuard-go setup complete!"
-echo "Client1 config: $CLIENT1_CONF"
-echo "Client2 config: $CLIENT2_CONF (QR code above)"
+# -----------------------
+# STEP 9: FINISHED
+# -----------------------
+log "[SUCCESS] WireGuard setup completed!"
+log "Client configs are in ~/wg-clients"
+log "Use 'sudo systemctl status $WG_INTERFACE' to check WireGuard service."
